@@ -151,16 +151,19 @@ class Scene:
         )
 
     def metadata(self) -> dict[str, object]:
-        """JSON-ready description of everything that produced the image."""
+        """JSON-ready description of everything that produced the image.
+
+        The palette is named rather than inlined: its control points are part of
+        the code, and the renderer version in the same chunk identifies them.
+        """
         return {
-            "palette": self.palette.name,
+            "blur_taps": self.blur_taps,
             "center_imag": self.center_imag,
             "center_real": self.center_real,
-            "blur_taps": self.blur_taps,
             "exposure": self.exposure,
             "height": self.height,
             "iterations": self.iterations,
-            "palette_coefficients": self.palette.value,
+            "palette": self.palette.name,
             "samples_per_pixel": self.samples_per_pixel,
             "seed": self.seed,
             "span_imag": self.span_imag,

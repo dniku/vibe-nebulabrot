@@ -30,12 +30,33 @@ def test_iteration_weights_stay_quantised_and_in_range(palette: Palette) -> None
 
 
 def test_tone_mapping_is_monotonic_and_end_to_end() -> None:
-    linear = np.linspace(0.0, 4.0 * COLOUR_LEVELS, 4096)
-    image = to_srgb(linear.reshape(-1, 1, 3), exposure=0.01)
+    """Reinhard never inverts, keeps black black, and asymptotes to white."""
+    exposure = 1.0
+    levels = np.linspace(0.0, 50.0 * _knee(exposure), 4096)
+    grey = np.broadcast_to(levels.reshape(-1, 1, 1), (levels.size, 1, 3))
+    image = to_srgb(grey, exposure=exposure)
     assert image.dtype == np.uint8
+    assert np.all(image[:, 0, :] == image[:, 0, 0][:, None]), "channels must not diverge"
     assert np.all(np.diff(image[:, 0, 0]) >= 0), "more light must never darken a pixel"
     assert image[0, 0, 0] == 0
-    assert image[-1, 0, 0] == 255
+    assert image[-1, 0, 0] > 250
+
+
+def test_exposure_positions_the_reinhard_knee() -> None:
+    """``--exposure`` says how much accumulated light counts as the knee.
+
+    One accumulated colour unit is ``1 / COLOUR_LEVELS`` of a fully bright
+    splat, so the knee sits at ``COLOUR_LEVELS / exposure``.  Getting that scale
+    wrong is the easy way to render an all-black or all-white frame.
+    """
+    for exposure in (0.00032, 0.01, 1.0, 40.0):
+        at_knee = to_srgb(np.full((1, 1, 3), _knee(exposure)), exposure=exposure)[0, 0, 0]
+        # Reinhard maps the knee to 0.5 linear light, which sRGB encodes as 186.
+        assert 180 <= at_knee <= 192
+
+
+def _knee(exposure: float) -> float:
+    return COLOUR_LEVELS / exposure
 
 
 def test_black_stays_black() -> None:

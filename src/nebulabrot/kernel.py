@@ -98,8 +98,12 @@ def accumulate(
                 z_real, z_imag = z_real[inside], z_imag[inside]
                 c_real, c_imag = c_real[inside], c_imag[inside]
             pixel_x, pixel_y = scene.complex_to_pixel(z_real, z_imag)
-            row = np.floor(np.clip(pixel_y, *clip_y)).astype(np.int64) + ring
-            column = np.floor(np.clip(pixel_x, *clip_x)).astype(np.int64) + ring
+            # Pixel x covers ``[x - 0.5, x + 0.5)``: samples are jittered around
+            # the pixel centre, so the owning pixel is found by rounding, and
+            # the first orbit point of a sample is then guaranteed to land back
+            # on the pixel the sample came from.
+            row = np.floor(np.clip(pixel_y, *clip_y) + 0.5).astype(np.int64) + ring
+            column = np.floor(np.clip(pixel_x, *clip_x) + 0.5).astype(np.int64) + ring
             # Merge orbit points that share a pixel before touching the buffer:
             # a render writes to a few per cent of the image per iteration, so
             # touching every pixel would be the dominant cost by far.  The

@@ -16,6 +16,10 @@ nebulabrot = "nebulabrot.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
+
 [tool.ruff]
 line-length = 100
 target-version = "py314"
