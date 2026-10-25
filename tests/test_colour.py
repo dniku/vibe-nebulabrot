@@ -84,3 +84,41 @@ def test_density_gamma_reveals_the_faint_end() -> None:
     assert np.all(lifted > untouched), "gamma below 1 must lift light below the knee"
     assert lifted[0] < lifted[1], "the curve must stay monotonic"
     assert to_srgb(np.zeros((1, 1, 3)), exposure=exposure, density_gamma=0.5).max() == 0
+
+
+def test_bright_light_washes_out_far_less_than_a_per_channel_roll_off() -> None:
+    """Highlights must keep the hue of dim light of the same chromaticity.
+
+    The sRGB transfer function is per channel, so encoded chromaticity drifts
+    between two brightnesses even for a perfect roll-off.  Rolling Reinhard off
+    per channel instead of on luminance drifts several times further, driving the
+    dense core of a nebula towards white; that drift is the regression here, so
+    the counterfactual is computed inline and compared against rather than a
+    constant being asserted.
+    """
+    exposure = 0.0002
+    tint = np.array([1.0, 0.5, 0.3])
+    frame = np.stack([tint * _knee(exposure) * factor for factor in (0.02, 2.0)])[:, None, :]
+
+    image = to_srgb(frame, exposure=exposure, density_gamma=1.0).astype(np.float64)
+    drift = _chromaticity_drift(image)
+
+    linear = frame / _knee(exposure)
+    counterfactual = _encode_srgb(linear / (1.0 + linear))
+    assert drift < _chromaticity_drift(counterfactual * 255.0) / 2.0
+
+
+def _chromaticity_drift(image: np.ndarray) -> float:
+    """Largest change in normalised RGB between the two pixels of ``image``."""
+    chromaticity = image / image.max(axis=-1, keepdims=True)
+    return float(np.abs(chromaticity[1, 0] - chromaticity[0, 0]).max())
+
+
+def _encode_srgb(linear: np.ndarray) -> np.ndarray:
+    """The transfer function, needed only to score the counterfactual roll-off."""
+    encoded = np.where(
+        linear <= 0.0031308,
+        linear * 12.92,
+        1.055 * np.power(np.clip(linear, 0.0, 1.0), 1.0 / 2.4) - 0.055,
+    )
+    return np.clip(encoded, 0.0, 1.0)
