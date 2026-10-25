@@ -34,6 +34,30 @@ class Palette(enum.Enum):
         (0.80, 0.980, 0.880, 0.360),
         (1.00, 0.420, 0.930, 0.760),
     )
+    #: Crimson through orange to gold: one hue family, so a pixel that mixes
+    #: young and old light stays inside the wedge instead of cancelling to grey.
+    CRIMSON_GOLD = (
+        (0.00, 0.020, 0.005, 0.040),
+        (0.25, 0.330, 0.010, 0.110),
+        (0.50, 0.800, 0.060, 0.020),
+        (0.75, 0.990, 0.330, 0.010),
+        (1.00, 0.990, 0.760, 0.060),
+    )
+    #: Deep blue-violet through magenta to rose, the default for the artifact.
+    #:
+    #: Every control point sits within about 100 degrees of hue, which is what
+    #: makes a frame colourful: hue-per-age averages over the ages that reach a
+    #: pixel, and averaging analogous hues leaves them coloured while averaging
+    #: complementary ones (the violet-to-teal span of ``DEEP_FIELD``) walks the
+    #: mixture through neutral.  Averaging also caps colour in the dense core,
+    #: where most light lands: measured Oklab C* there is 0.21 for this ramp
+    #: against 0.019 for ``DEEP_FIELD``.
+    VIOLET_ROSE = (
+        (0.00, 0.020, 0.005, 0.060),
+        (0.30, 0.140, 0.010, 0.420),
+        (0.60, 0.600, 0.020, 0.460),
+        (1.00, 0.980, 0.100, 0.360),
+    )
     #: Cold teal cloud with a hot amber core.
     EMBER = (
         (0.00, 0.010, 0.030, 0.055),
@@ -189,6 +213,6 @@ DEFAULT_SCENE = Scene(
     blur_taps=1,
     exposure=0.0002,
     density_gamma=0.7,
-    palette=Palette.DEEP_FIELD,
+    palette=Palette.VIOLET_ROSE,
     seed=0x5EED,
 )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import pathlib
@@ -10,7 +11,7 @@ import numpy as np
 import PIL.Image
 
 from nebulabrot import render
-from nebulabrot.scene import Palette, Scene
+from nebulabrot.scene import DEFAULT_SCENE, Palette, Scene
 
 
 def _scene(**overrides: object) -> Scene:
@@ -79,3 +80,21 @@ def test_rendered_frame_has_detail(tmp_path: pathlib.Path) -> None:
     assert (luma > 250).mean() < 0.05, "expected no blown-out highlights"
     gradient = np.abs(np.diff(luma, axis=1)).mean()
     assert gradient > 1.0, "expected orbit structure, not a flat wash"
+
+
+def test_default_palette_cannot_render_grey() -> None:
+    """A grey artifact passed every check it was originally tuned against.
+
+    Luma statistics cannot see colour, and hue-per-age averages the ramp over
+    whichever ages reach a pixel, so a ramp that spans complementary hues
+    averages towards neutral.  A ramp inside one hue family cannot, which is why
+    the default ramp does; the margin between the two cases is 0.07 against 0.21
+    on this scene.
+    """
+    scene = dataclasses.replace(
+        DEFAULT_SCENE, width=96, height=54, iterations=60, samples_per_pixel=4
+    )
+    image = render.render(scene, jobs=1).astype(np.float64) / 255.0
+    visible = image.max(axis=-1) > 0.2
+    assert visible.mean() > 0.05, "the scene has to put light on some pixels"
+    assert (image.max(axis=-1) - image.min(axis=-1))[visible].mean() > 0.15
