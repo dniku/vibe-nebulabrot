@@ -10,8 +10,6 @@ lets a render be reproduced with any number of worker processes (see
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import numpy.typing as npt
 

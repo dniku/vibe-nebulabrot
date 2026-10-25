@@ -33,10 +33,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=DEFAULT_SCENE.width)
     parser.add_argument("--height", type=int, default=DEFAULT_SCENE.height)
     parser.add_argument(
-        "--center-real", type=float, default=DEFAULT_SCENE.center_real, help="real part of the viewport centre"
+        "--center-real",
+        type=float,
+        default=DEFAULT_SCENE.center_real,
+        help="real part of the viewport centre",
     )
     parser.add_argument(
-        "--center-imag", type=float, default=DEFAULT_SCENE.center_imag, help="imaginary part of the viewport centre"
+        "--center-imag",
+        type=float,
+        default=DEFAULT_SCENE.center_imag,
+        help="imaginary part of the viewport centre",
     )
     parser.add_argument(
         "--span-real",

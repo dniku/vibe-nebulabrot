@@ -9,6 +9,7 @@ the long rays of a Nebulabrot reach across the frame.
 from __future__ import annotations
 
 import concurrent.futures
+import itertools
 import json
 import multiprocessing
 import os
@@ -35,23 +36,17 @@ def default_jobs(scene: Scene) -> int:
     try:
         with open("/proc/meminfo") as meminfo:
             available = next(
-                int(line.split()[1]) * 1024
-                for line in meminfo
-                if line.startswith("MemAvailable:")
+                int(line.split()[1]) * 1024 for line in meminfo if line.startswith("MemAvailable:")
             )
-    except (OSError, StopIteration):
+    except OSError, StopIteration:
         return cores
     # Leave half of the available memory to everything else on the machine.
     return max(1, min(cores, int(available / 2) // scene.accumulator_bytes))
 
 
-def _render_samples(
-    scene: Scene, first_sample: int, last_sample: int
-) -> npt.NDArray[np.float64]:
+def _render_samples(scene: Scene, first_sample: int, last_sample: int) -> npt.NDArray[np.float64]:
     ring = scene.ring_width
-    buffer = np.zeros(
-        (scene.height + 2 * ring, scene.width + 2 * ring, 3), dtype=np.float64
-    )
+    buffer = np.zeros((scene.height + 2 * ring, scene.width + 2 * ring, 3), dtype=np.float64)
     kernel.accumulate(scene, first_sample, last_sample, buffer)
     return buffer
 
@@ -59,7 +54,7 @@ def _render_samples(
 def _sample_bounds(scene: Scene, jobs: int) -> list[tuple[int, int]]:
     total = scene.total_samples
     bounds = [job * total // jobs for job in range(jobs + 1)]
-    return list(zip(bounds[:-1], bounds[1:], strict=True))
+    return list(itertools.pairwise(bounds))
 
 
 def accumulate(scene: Scene, jobs: int) -> npt.NDArray[np.float64]:
@@ -70,9 +65,7 @@ def accumulate(scene: Scene, jobs: int) -> npt.NDArray[np.float64]:
     """
     started = time.monotonic()
     ring = scene.ring_width
-    accumulated = np.zeros(
-        (scene.height + 2 * ring, scene.width + 2 * ring, 3), dtype=np.float64
-    )
+    accumulated = np.zeros((scene.height + 2 * ring, scene.width + 2 * ring, 3), dtype=np.float64)
     bounds = _sample_bounds(scene, jobs)
     if jobs == 1:
         for first, last in bounds:
@@ -107,9 +100,7 @@ def render(scene: Scene, jobs: int) -> npt.NDArray[np.uint8]:
     return colour.to_srgb(accumulate(scene, jobs), scene.exposure)
 
 
-def write_png(
-    image: npt.NDArray[np.uint8], scene: Scene, path: pathlib.Path
-) -> None:
+def write_png(image: npt.NDArray[np.uint8], scene: Scene, path: pathlib.Path) -> None:
     """Write ``image`` deterministically: no timestamps, fixed chunk order."""
     metadata = PIL.PngImagePlugin.PngInfo()
     metadata.add_text("Software", f"nebulabrot {__version__}")

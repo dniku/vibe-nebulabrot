@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from nebulabrot import render
-from nebulabrot.colour import COLOUR_LEVELS, iteration_weights
+from nebulabrot.colour import iteration_weights
 from nebulabrot.scene import Palette, Scene
 
 
@@ -49,7 +49,9 @@ def test_escaped_orbits_stop_contributing() -> None:
     single-iteration render above.  Termination that fires too late would add
     light here, and termination that is too eager would remove the first splat.
     """
-    scene = _scene(center_real=-10.0, span_real=3.0, iterations=40, samples_per_pixel=1, blur_taps=0)
+    scene = _scene(
+        center_real=-10.0, span_real=3.0, iterations=40, samples_per_pixel=1, blur_taps=0
+    )
     accumulated = render.accumulate(scene, jobs=1)
     [weight] = iteration_weights(scene.palette, 1)
     np.testing.assert_array_equal(accumulated, np.broadcast_to(weight, accumulated.shape))
@@ -63,7 +65,9 @@ def test_partitioning_samples_does_not_change_the_image(jobs: int) -> None:
     notice: that is what makes a render reproducible across machines with a
     different core count.
     """
-    assert np.array_equal(render.accumulate(_scene(), jobs=1), render.accumulate(_scene(), jobs=jobs))
+    assert np.array_equal(
+        render.accumulate(_scene(), jobs=1), render.accumulate(_scene(), jobs=jobs)
+    )
 
 
 def test_blur_smooths_without_changing_total_light() -> None:
@@ -85,6 +89,12 @@ def test_seed_changes_the_dust_but_not_the_total_light() -> None:
 
 
 def test_scene_rejects_impossible_settings() -> None:
-    for field, value in [("iterations", 0), ("samples_per_pixel", 0), ("span_real", 0.0), ("exposure", -1.0), ("blur_taps", -1)]:
+    for field, value in [
+        ("iterations", 0),
+        ("samples_per_pixel", 0),
+        ("span_real", 0.0),
+        ("exposure", -1.0),
+        ("blur_taps", -1),
+    ]:
         with pytest.raises(ValueError):
             _scene(**{field: value})

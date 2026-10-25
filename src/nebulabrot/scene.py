@@ -81,9 +81,7 @@ class Scene:
         if self.iterations < 1:
             raise ValueError(f"iterations must be positive, got {self.iterations}")
         if self.samples_per_pixel < 1:
-            raise ValueError(
-                f"samples_per_pixel must be positive, got {self.samples_per_pixel}"
-            )
+            raise ValueError(f"samples_per_pixel must be positive, got {self.samples_per_pixel}")
         if self.blur_taps < 0:
             raise ValueError(f"blur_taps must not be negative, got {self.blur_taps}")
         if self.exposure <= 0.0:
