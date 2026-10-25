@@ -15,7 +15,9 @@ $ nix develop                  # renderer, Python env, ruff, pyrefly
 $ nix build .#nebulabrot        # runs ruff format/check, pyrefly and pytest
 ```
 
-Rendering 3840×2160 at 16 samples per pixel and 500 iterations takes about a minute on 24 cores and roughly 200 MB of accumulator per worker, so `--jobs` defaults to a count derived from the core count and `MemAvailable` rather than from cores alone.
+Rendering 3840×2160 at 16 samples per pixel and 500 iterations takes about three minutes, and each worker holds roughly 200 MB of accumulator, so `--jobs` defaults to a count derived from the core count and `MemAvailable` rather than from cores alone.
+
+Adding workers buys little past a handful: on a 24-core host `--jobs` 2, 8 and 24 take 173 s, 173 s and 168 s. Splats land at effectively random addresses in a 199 MB accumulator (3840·2160·3 channels·8 bytes), so the render waits on memory traffic rather than on cores. `--jobs` is a memory knob here, not a speed knob.
 
 ## How a frame is built
 
@@ -33,6 +35,7 @@ Each worker owns a full-frame accumulator rather than a strip of one, because an
 - **Arithmetic.** Accumulated values are exact integer sums, so neither chunking nor process count changes a single bit (`tests/test_kernel.py::test_partitioning_samples_does_not_change_the_image`).
 - **Randomness.** Jitter is a hash of the sample index and `--seed`, never a stream position.
 - **Container.** The PNG carries the scene parameters as a `tEXt` chunk, is written without timestamps, and uses a fixed zlib level, so the file has nothing in it that varies between runs.
+- **Measured.** The shipped frame re-rendered at `--jobs` 8 and 24, and built in the Nix sandbox at `--jobs` 2 (`NIX_BUILD_CORES`), all give `sha256:a2e6e5b56274b60fa31245c85ff204978532cfc14d84af3b5f130f3337579e34`.
 
 To confirm it yourself, render the same scene with different parallelism and compare:
 
