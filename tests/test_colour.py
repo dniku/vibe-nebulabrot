@@ -34,7 +34,7 @@ def test_tone_mapping_is_monotonic_and_end_to_end() -> None:
     exposure = 1.0
     levels = np.linspace(0.0, 50.0 * _knee(exposure), 4096)
     grey = np.broadcast_to(levels.reshape(-1, 1, 1), (levels.size, 1, 3))
-    image = to_srgb(grey, exposure=exposure)
+    image = to_srgb(grey, exposure=exposure, density_gamma=1.0)
     assert image.dtype == np.uint8
     assert np.all(image[:, 0, :] == image[:, 0, 0][:, None]), "channels must not diverge"
     assert np.all(np.diff(image[:, 0, 0]) >= 0), "more light must never darken a pixel"
@@ -50,7 +50,9 @@ def test_exposure_positions_the_reinhard_knee() -> None:
     wrong is the easy way to render an all-black or all-white frame.
     """
     for exposure in (0.00032, 0.01, 1.0, 40.0):
-        at_knee = to_srgb(np.full((1, 1, 3), _knee(exposure)), exposure=exposure)[0, 0, 0]
+        at_knee = to_srgb(
+            np.full((1, 1, 3), _knee(exposure)), exposure=exposure, density_gamma=1.0
+        )[0, 0, 0]
         # Reinhard maps the knee to 0.5 linear light, which sRGB encodes as 186.
         assert 180 <= at_knee <= 192
 
@@ -60,4 +62,25 @@ def _knee(exposure: float) -> float:
 
 
 def test_black_stays_black() -> None:
-    assert to_srgb(np.zeros((1, 1, 3)), exposure=1234.5).tolist() == [[[0, 0, 0]]]
+    assert to_srgb(np.zeros((1, 1, 3)), exposure=1234.5, density_gamma=0.7).tolist() == [
+        [[0, 0, 0]]
+    ]
+
+
+def test_density_gamma_reveals_the_faint_end() -> None:
+    """Orbit density spans decades; gamma < 1 is what makes the dust visible.
+
+    Below the knee, warping with a gamma below 1 must lift dim light while
+    leaving black at black, and the ordering of two light levels must not
+    change: the curve may compress contrast but never invert it.
+    """
+    exposure = 0.0002
+    dim, brighter = _knee(exposure) * np.array([1e-4, 1e-2])
+    frame = np.zeros((2, 1, 3))
+    frame[0, 0, :] = dim
+    frame[1, 0, :] = brighter
+    untouched = to_srgb(frame, exposure=exposure, density_gamma=1.0)[:, 0, 0]
+    lifted = to_srgb(frame, exposure=exposure, density_gamma=0.5)[:, 0, 0]
+    assert np.all(lifted > untouched), "gamma below 1 must lift light below the knee"
+    assert lifted[0] < lifted[1], "the curve must stay monotonic"
+    assert to_srgb(np.zeros((1, 1, 3)), exposure=exposure, density_gamma=0.5).max() == 0

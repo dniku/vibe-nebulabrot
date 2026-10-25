@@ -75,6 +75,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Reinhard exposure; higher brightens the faint outer clouds (default: %(default)s)",
     )
     parser.add_argument(
+        "--density-gamma",
+        type=float,
+        default=DEFAULT_SCENE.density_gamma,
+        help="warp orbit density by this power before tone mapping (default: %(default)s)",
+    )
+    parser.add_argument(
         "--palette",
         type=_palette,
         default=DEFAULT_SCENE.palette,
@@ -103,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         samples_per_pixel=args.samples,
         blur_taps=args.blur_taps,
         exposure=args.exposure,
+        density_gamma=args.density_gamma,
         palette=args.palette,
         seed=args.seed,
     )

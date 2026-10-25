@@ -15,9 +15,11 @@ import numpy.typing as npt
 
 from nebulabrot.scene import Palette
 
-#: Colour levels of the quantised weights.  16 bits keeps the accumulated
-#: integer sum exact (float64 is exact for integers below 2**53) even if every
-#: orbit point of a 4K render landed on a single pixel.
+#: Colour levels of the quantised weights.  Accumulation stays exact because
+#: every weight is an integer and float64 represents integers below 2**53
+#: exactly.  The worst case is every orbit point of a render landing on one
+#: pixel: the default 4K scene has 3840 * 2160 * 16 * 500 = 6.6e10 orbit points,
+#: and 6.6e10 * 2**16 = 4.3e15 < 9.0e15, so even that keeps every sum exact.
 COLOUR_LEVELS = 1 << 16
 
 #: Linear-light crossover of the sRGB transfer function (IEC 61966-2-1).
@@ -46,6 +48,9 @@ def smooth(accumulated: npt.NDArray[np.float64], taps: int, ring: int) -> npt.ND
     2-tap tent per axis.  Accumulation is linear, so applying the tent once to
     the summed buffer is equivalent to applying it to every splat, at a small
     fraction of the cost.  ``taps == 1`` is exactly bilinear splatting.
+
+    ``ring`` must be at least ``taps``: ``Scene.ring_width`` guarantees it, and
+    each tap consumes one ring column that would otherwise have received light.
     """
     blurred = accumulated
     for _ in range(taps):
@@ -57,14 +62,24 @@ def smooth(accumulated: npt.NDArray[np.float64], taps: int, ring: int) -> npt.ND
     return blurred[ring:-ring, ring:-ring, :]
 
 
-def to_srgb(accumulated: npt.NDArray[np.float64], exposure: float) -> npt.NDArray[np.uint8]:
-    """Tone-map linear accumulated light to 8-bit sRGB, in place.
+def to_srgb(
+    accumulated: npt.NDArray[np.float64], exposure: float, density_gamma: float
+) -> npt.NDArray[np.uint8]:
+    """Tone-map accumulated linear light to 8-bit sRGB.
 
-    Reinhard compression (``x / (1 + x)``) keeps the dense core of the nebula
-    from clipping while leaving the faint outer clouds visible, and saturates
-    towards white exactly like a long exposure does.
+    ``density_gamma`` warps the density first, which is the part that makes a
+    Nebulabrot viewable: orbit density spans five decades between the faint dust
+    and the core, and a default frame has nothing in between.  Warping by
+    ``x ** density_gamma`` spends the 8-bit range on the decades rather than on
+    the core, at the cost of flattening contrast within any one of them.  A
+    gamma of 1.0 leaves the density untouched, so Reinhard alone then decides
+    the curve: it keeps the dense core from clipping and saturates towards white
+    exactly like a long exposure does.
+
+    The curve is evaluated with reciprocal identities so that a full frame needs
+    one temporary instead of one per stage; the caller's buffer is not modified.
     """
-    linear = accumulated * (exposure / COLOUR_LEVELS)
+    linear = np.power(accumulated * (exposure / COLOUR_LEVELS), density_gamma)
     np.add(linear, 1.0, out=linear)
     np.reciprocal(linear, out=linear)
     np.subtract(1.0, linear, out=linear)

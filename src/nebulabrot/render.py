@@ -97,7 +97,7 @@ def accumulate(scene: Scene, jobs: int) -> npt.NDArray[np.float64]:
 
 def render(scene: Scene, jobs: int) -> npt.NDArray[np.uint8]:
     """Render ``scene`` to 8-bit sRGB."""
-    return colour.to_srgb(accumulate(scene, jobs), scene.exposure)
+    return colour.to_srgb(accumulate(scene, jobs), scene.exposure, scene.density_gamma)
 
 
 def write_png(image: npt.NDArray[np.uint8], scene: Scene, path: pathlib.Path) -> None:

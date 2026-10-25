@@ -21,6 +21,7 @@ def _scene(**overrides: object) -> Scene:
         "samples_per_pixel": 4,
         "blur_taps": 1,
         "exposure": 1.0,
+        "density_gamma": 1.0,
         "palette": Palette.DEEP_FIELD,
         "seed": 0x5EED,
     }

@@ -23,7 +23,7 @@ Rendering 3840×2160 at 16 samples per pixel and 500 iterations takes about a mi
 2. **Iterate and splat** (`src/nebulabrot/kernel.py`). Orbits are advanced a whole chunk at a time; samples whose `|z|` exceeds `Scene.escape_radius_squared` are dropped, which is safe because past `|z| > 2` an orbit diverges monotonically and can never return to the frame. Orbit points that share a pixel are merged before touching the accumulator: only a few per cent of the image is written in a given iteration, so a dense per-iteration update would be the dominant cost by far.
 3. **Accumulate colour by orbit age** (`src/nebulabrot/colour.py`). A splat deposits the palette colour of its orbit index, so hue reports how far a point has travelled from its seed. Weights are rounded to multiples of `1/65536`, which keeps every partial sum an exact integer: the accumulation is then genuinely associative, and that is the property `--jobs`-independence rests on.
 4. **Smooth** (`nebulabrot.colour.smooth`). Each orbit point is spread over the two pixels around its sub-pixel position, a 2-tap tent per axis. Because accumulation is linear, applying that tent once to the summed buffer equals applying it to every splat, at a fraction of the cost. `--blur-taps 1` is exactly bilinear splatting; more taps give a softer nebula.
-5. **Tone map** (`nebulabrot.colour.to_srgb`). Linear light is scaled by `--exposure`, compressed with Reinhard (`x / (1 + x)`, which saturates towards white like a long exposure) and encoded through the sRGB transfer function.
+5. **Tone map** (`nebulabrot.colour.to_srgb`). Orbit density is warped by `--density-gamma`, scaled by `--exposure`, compressed with Reinhard (`x / (1 + x)`, which saturates towards white like a long exposure) and encoded through the sRGB transfer function. The warp matters more than it looks: orbit density spans about five decades between the faint dust and the core of the nebula, and without it the frame is a bright blob floating in flat black — at `--density-gamma 1` the default scene is 64 % genuinely black and shows nothing between 0 and 200.
 
 Each worker owns a full-frame accumulator rather than a strip of one, because an orbit point can land anywhere in the frame: strips would silently drop the contributions of samples owned by other workers, which is exactly what makes the rays reach across the image.
 
@@ -44,7 +44,7 @@ $ sha256sum /tmp/a.png /tmp/b.png   # identical
 
 ## Tuning a frame
 
-`--center-real`, `--center-imag` and `--span-real` choose the viewport in the parameter plane; `--iterations` sets how long orbits live and therefore how far the rays reach and how much of the colour ramp is used; `--samples` trades noise for time; `--exposure` sets the Reinhard knee. The defaults in `nebulabrot.scene.DEFAULT_SCENE` are the artifact `nix build .#image` produces. A wide view placed off the real axis avoids a mirror-symmetric composition.
+`--center-real`, `--center-imag` and `--span-real` choose the viewport in the parameter plane; `--iterations` sets how long orbits live and therefore how far the rays reach and how much of the colour ramp is used; `--samples` trades noise for time; `--density-gamma` decides how the decades of density are shared out; `--exposure` sets where the Reinhard knee sits, in units of `COLOUR_LEVELS / exposure` of accumulated light. The defaults in `nebulabrot.scene.DEFAULT_SCENE` are the artifact `nix build .#image` produces. A wide view placed off the real axis avoids a mirror-symmetric composition.
 
 ## Residual notes
 

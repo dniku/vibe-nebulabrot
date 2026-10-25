@@ -70,6 +70,7 @@ class Scene:
     samples_per_pixel: int
     blur_taps: int
     exposure: float
+    density_gamma: float
     palette: Palette
     seed: int
 
@@ -86,6 +87,8 @@ class Scene:
             raise ValueError(f"blur_taps must not be negative, got {self.blur_taps}")
         if self.exposure <= 0.0:
             raise ValueError(f"exposure must be positive, got {self.exposure}")
+        if self.density_gamma <= 0.0:
+            raise ValueError(f"density_gamma must be positive, got {self.density_gamma}")
         if not math.isfinite(self.center_real) or not math.isfinite(self.center_imag):
             raise ValueError("centre must be finite")
 
@@ -160,6 +163,7 @@ class Scene:
             "blur_taps": self.blur_taps,
             "center_imag": self.center_imag,
             "center_real": self.center_real,
+            "density_gamma": self.density_gamma,
             "exposure": self.exposure,
             "height": self.height,
             "iterations": self.iterations,
@@ -183,7 +187,8 @@ DEFAULT_SCENE = Scene(
     iterations=500,
     samples_per_pixel=16,
     blur_taps=1,
-    exposure=0.00032,
+    exposure=0.0002,
+    density_gamma=0.7,
     palette=Palette.DEEP_FIELD,
     seed=0x5EED,
 )
