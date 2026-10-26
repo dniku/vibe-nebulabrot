@@ -4,6 +4,12 @@ A renderer for the **Nebulabrot**: instead of asking whether a Mandelbrot orbit 
 
 The render is bit-reproducible: the same commit, the same flags and the pinned Nix inputs produce identical PNG bytes on any machine and for any value of `--jobs`.
 
+[![CI](https://github.com/dniku/vibe-nebulabrot/actions/workflows/ci.yml/badge.svg)](https://github.com/dniku/vibe-nebulabrot/actions/workflows/ci.yml)
+
+![The artifact: Mandelbrot orbits of the whole set, coloured by the direction the light reaching each pixel came from. Emerald cloud and rays at the left, the set as a dark silhouette crossed by dust lanes at the right.](docs/images/artifact.png)
+
+*The artifact -- `nix build .#image`, 3840x2160, digest in [`ARTIFACT.sha256`](ARTIFACT.sha256). [Here is a crop of it at one-to-one scale](docs/images/artifact-detail.png), from the filaments left of the set, where the things this renderer has to protect -- hairline structure and smooth gradients -- are visible together.*
+
 ## Usage
 
 ```console
@@ -14,9 +20,57 @@ $ nix run .#nebulabrot -- --output nebula.png --span-real 1.1 --center-imag 0.3
 $ nix run .#nebulabrot -- --output nebula.png --chroma-gain 0.8 --hue-dwell 0
 $ nix develop                  # renderer, Python env, ruff, pyrefly
 $ nix build .#nebulabrot       # runs ruff format/check, pyrefly and pytest
+$ nix develop --command python docs/figures.py --jobs 16   # redraw the images in this README
 ```
 
 The artifact is 3840x2160 at 32 samples per pixel and 500 iterations: about 135 s to accumulate at `--jobs 16` and 37 s to grade and encode. Each worker holds a full-frame accumulator of 199 MB (3840·2160·3 channels·8 bytes, plus a discard ring), so `--jobs` defaults to a count derived from the core count and `MemAvailable` rather than from cores alone, and is a memory knob rather than a speed knob: past a handful of workers the render waits on memory traffic, since splats land at effectively random addresses in a 199 MB buffer.
+
+## Architecture
+
+Two passes, and the split between them is the whole design: accumulation is the part that is compute-bound, parallel and required to be exactly associative, and grading is a single pass over one buffer that can be retuned without rendering anything again.
+
+```mermaid
+flowchart LR
+    scene["Scene: viewport, sampling budget, grade<br/>the single source of truth"]
+
+    subgraph workers ["Accumulate: one full-frame buffer per worker"]
+        seeds["seeds, jittered by hash(seed, sample index)"]
+        orbit["iterate z = z^2 + c<br/>retire escaped orbits, never drawn"]
+        splat["deposit 3 moments per pixel<br/>count, and the pole-to-seed unit vector<br/>rounded to 1/8192 so every sum is exact"]
+        seeds --> orbit --> splat
+    end
+
+    merge["sum the workers<br/>order-free: integer sums"]
+    blur["tent blur, 2 taps per axis<br/>crop the discard ring"]
+
+    subgraph grading ["Grade: one pass, retunable"]
+        tone["film curve on count x coherence shadow"]
+        palette["arg of the summed vector, turned by the palette"]
+        gate["chroma = lightness x polarization"]
+    end
+
+    png["PNG: scene as a tEXt chunk<br/>no timestamps, fixed zlib level"]
+
+    scene --> seeds
+    scene --> grading
+    splat --> merge --> blur --> grading --> png
+```
+
+The three moments are the hinge. They are not a colour, and cannot be tone mapped as one: two of them are a *direction*, so the buffer has to be decomposed into the parts that make a picture, each measured over the scale it is meaningful at.
+
+```mermaid
+flowchart LR
+    count["orbit count"] -->|"dimmed by the coherence shadow"| curve["logistic on log density"] --> L["lightness"]
+    vector["summed flux vector"] -->|"direction"| warp["periodic palette warp"] --> H["hue"]
+    vector -->|"mean vector length over count"| pol["polarization"]
+    pol -->|"gate"| C["chroma"]
+    L --> colour["Oklab, chroma trimmed along the ray to fit the display gamut"] --> px["pixel"]
+    H --> colour
+    C --> colour
+    pol -.->|"same measure, finer scale"| count
+```
+
+Both colour channels are *ratios*, which is why they are compared over a neighbourhood before being divided: blurring a numerator against an unblurred denominator would only move the noise somewhere else.
 
 ## How a frame is built
 
@@ -52,6 +106,25 @@ The shadow is deliberately *not* the flux magnitude. The reference colouring lig
 
 The shipped frame measures Oklab `L*` 0.10 / 0.41 / 0.83 at the 5th, 50th and 95th percentiles with 20% of the frame above `L*` 0.7, and chroma-to-lightness 0.22. The reference sits at 0.17 / 0.33 / 0.63 and 0.18: this frame is darker in its shadows, brighter in its cores, and carries about a quarter more colour.
 
+## How the look was reached
+
+Six renderings of one accumulation, each with one part of the grade taken back out. They share a field, an exposure and a seed, so the only difference between any two of them is the knob named over each panel. The two numbers under every title are diagnostics read off the encoded frame, not a scoreboard: `detail` is edge energy, and `flat mass` is the largest group of pixels sharing one exact colour.
+
+![Six grades of one accumulation: density alone, the coherence shadow off, the palette warp off, the reference's coherent-flux lightness, a clipped log window, and the shipped grade.](docs/images/grades.png)
+
+The route here was not direct, and the turns are the useful part of it.
+
+1. **Ramp the orbit index, as the reference does.** Colour that reports how far a point has travelled from its seed. Averaged over the ages reaching a pixel it cancels towards neutral, and the dense core -- where all the light is -- came out grey.
+2. **Deposit a direction instead.** Colour appeared, and it did not survive being averaged: hue is then the argument of a smooth vector field, which sweeps the spectrum evenly across the frame. A rich palette and a garish one, it turns out, are one parameter apart. This is the frame that earned the words "basically uniformly purple".
+3. **Measure instead of squint.** Grading the frame and the reference through Oklab found what the eye had been reporting without naming: nothing above `L*` 0.59, a third of the frame pinned to one black, and chroma climbing with lightness instead of holding alongside it. Two of the three were tone faults, not colour faults, which is why no amount of palette tuning had fixed them.
+4. **Try the reference's lightness.** `|sum|`, the magnitude of the flux sum, gives the reference its smooth background. It is the count times the polarization, so taking lightness from it blurs the density into whatever neighbourhood the direction was measured over -- the fourth panel, where the detail collapses to a tenth of the shipped frame's.
+5. **Split the two measurements.** Keep the count crisp and multiply it by a polarization measured at a fifteenth of the hue's radius. This is the change that turned the heatmap into a nebula: the interior of the set drops out as a silhouette, and the dust lanes appear inside it.
+6. **Warp the palette and reframe.** A periodic dwell so the spectrum stops being evenly spaced, and a viewport wide enough for the set to fill the frame instead of floating in it.
+
+Worth recording are the ideas that did not reach a panel: shearing the slice of three copies of the field to fake depth (concentric arcs of flat hue), a band-pass on chroma to buy sparkle (coloured grain), gating chroma by local density contrast (a pastel wash where the reference stays dark), and `1 - exp(-density)` for the tone (grey fog over everything, exactly as its reputation suggests).
+
+Everything above is drawn by `docs/figures.py`, which is why the two retired curves live in that script rather than in the library: they exist to be compared against, and nothing else should be able to reach them.
+
 ## Reproducibility
 
 - **Inputs.** `flake.lock` pins nixpkgs to one revision; numpy 2.5.2 and Pillow 12.3.0 come from there.
@@ -59,6 +132,7 @@ The shipped frame measures Oklab `L*` 0.10 / 0.41 / 0.83 at the 5th, 50th and 95
 - **Randomness.** Jitter is a hash of the sample index and `--seed`, never a stream position.
 - **Defaults.** The command line builds the shipped scene exactly: angles are read in degrees but defaults pass through untouched, because a default re-encoded on the way through the parser changes the artifact's bytes while changing nothing visible (`tests/test_render.py::test_running_with_no_flags_builds_the_shipped_scene`).
 - **Container.** The PNG carries the scene parameters as a `tEXt` chunk, is written without timestamps, and uses a fixed zlib level, so the file has nothing in it that varies between runs.
+- **Recorded.** [`ARTIFACT.sha256`](ARTIFACT.sha256) holds the digest of the shipped frame, and CI fails if `nix build .#image` stops producing it. That file, not this paragraph, is the thing to update if the look is ever deliberately changed.
 - **Measured.** The shipped frame, `sha256:122371bde2fd3494bd41ffbc8da21ffa83b792dc3066d9dc2d27d72c573aae50`: rendered locally at `--jobs 16` and at `--jobs 8`, and by `nix build .#image` inside the Nix sandbox at that build's own `NIX_BUILD_CORES`, to the same digest all three times.
 
 To confirm it yourself, render the same scene with different parallelism and compare:
