@@ -1,0 +1,63 @@
+name: CI
+
+# Everything the README promises is checked here: the code builds and its tests
+# pass under the pinned Nix inputs, the shipped 4K artifact still comes out with the digest `ARTIFACT.sha256` quotes, and that digest does not depend on how many workers did the rendering.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Build, lint, type check, test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+
+      # The package's own preCheck runs ruff and pyrefly, but only over the fileset
+      # the package ships. Run them through the development shell instead, which
+      # puts the *pinned* ruff and pyrefly on the PATH and sees the whole checkout,
+      # including the figure script under docs/ that the package does not carry.
+      - name: Formatting and linting over the whole repository
+        run: |
+          nix develop --command ruff format --check .
+          nix develop --command ruff check .
+
+      - name: Package, checks and tests
+        run: nix build .#nebulabrot
+
+  artifact:
+    name: Reproduce the 4K artifact
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+
+      - name: Render
+        run: nix build .#image --no-link --print-out-paths | tee nix-out.txt
+
+      - name: Compare against the documented digest
+        run: |
+          digest=$(cut --fields=1 ARTIFACT.sha256)
+          printf '%s  %s\n' "$digest" "$(cat nix-out.txt)" | sha256sum --check --status
+          echo "Artifact reproduced: $digest"
+
+      - name: Same bytes whatever the worker count
+        run: |
+          nix build .#nebulabrot --out-link package
+          for jobs in 1 5; do
+            ./package/bin/nebulabrot --output "two-ways-$jobs.png" --jobs "$jobs" \
+              --width 1280 --height 720 --samples 16 --tone-mid 4
+          done
+          sha256sum two-ways-1.png two-ways-5.png
+          cmp two-ways-1.png two-ways-5.png
