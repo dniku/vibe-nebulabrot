@@ -1,6 +1,6 @@
 # nebulabrot
 
-A renderer for the **Nebulabrot**: instead of asking whether a Mandelbrot orbit escapes, plot the orbit itself. Every pixel of the frame is a seed `c`, its orbit `z <- z^2 + c` is iterated, and each `z` deposits colour into whichever pixel of the *same* frame it lands on. Dense, slow-moving orbits build nebula clouds; escaping orbits streak across the frame as rays. The frame is therefore not a picture of the parameter plane, it is a picture of where orbits of the parameter plane go.
+A renderer for the **Nebulabrot**: instead of asking whether a Mandelbrot orbit escapes, plot the orbit itself. Every pixel of the frame is a seed `c`, its orbit `z <- z^2 + c` is iterated, and each `z` deposits light into whichever pixel of the *same* frame it lands on. Dense, slow-moving orbits build nebula clouds; escaping orbits streak across the frame as rays. The frame is therefore not a picture of the parameter plane, it is a picture of where orbits of the parameter plane go.
 
 The render is bit-reproducible: the same commit, the same flags and the pinned Nix inputs produce identical PNG bytes on any machine and for any value of `--jobs`.
 
@@ -10,37 +10,56 @@ The render is bit-reproducible: the same commit, the same flags and the pinned N
 $ nix build .#image            # render the 4K artifact to ./result
 $ nix build .#image --print-out-paths
 /nix/store/…-nebulabrot-3840x2160.png
-$ nix run .#nebulabrot -- --output nebula.png --iterations 200 --exposure 0.0004
-$ nix run .#nebulabrot -- --output nebula.png --palette CRIMSON_GOLD
+$ nix run .#nebulabrot -- --output nebula.png --span-real 1.1 --center-imag 0.3
+$ nix run .#nebulabrot -- --output nebula.png --chroma-gain 0.8 --hue-dwell 0
 $ nix develop                  # renderer, Python env, ruff, pyrefly
-$ nix build .#nebulabrot        # runs ruff format/check, pyrefly and pytest
+$ nix build .#nebulabrot       # runs ruff format/check, pyrefly and pytest
 ```
 
-Rendering 3840×2160 at 16 samples per pixel and 500 iterations takes about three minutes, and each worker holds roughly 200 MB of accumulator, so `--jobs` defaults to a count derived from the core count and `MemAvailable` rather than from cores alone.
-
-Adding workers buys little past a handful: on a 24-core host `--jobs` 2, 8 and 24 take 173 s, 173 s and 168 s. Splats land at effectively random addresses in a 199 MB accumulator (3840·2160·3 channels·8 bytes), so the render waits on memory traffic rather than on cores. `--jobs` is a memory knob here, not a speed knob.
+The artifact is 3840x2160 at 32 samples per pixel and 500 iterations: about 135 s to accumulate at `--jobs 16` and 37 s to grade and encode. Each worker holds a full-frame accumulator of 199 MB (3840·2160·3 channels·8 bytes, plus a discard ring), so `--jobs` defaults to a count derived from the core count and `MemAvailable` rather than from cores alone, and is a memory knob rather than a speed knob: past a handful of workers the render waits on memory traffic, since splats land at effectively random addresses in a 199 MB buffer.
 
 ## How a frame is built
 
 1. **Sample** (`src/nebulabrot/kernel.py`). Each pixel contributes `--samples` seeds, jittered inside the pixel by a SplitMix64 hash of `(seed, sample index)`. Being a hash of the sample index rather than a pull from a random stream means the offsets do not depend on how samples are split between chunks or workers.
-2. **Iterate and splat** (`src/nebulabrot/kernel.py`). Orbits are advanced a whole chunk at a time; samples whose `|z|` exceeds `Scene.escape_radius_squared` are dropped, which is safe because past `|z| > 2` an orbit diverges monotonically and can never return to the frame. Orbit points that share a pixel are merged before touching the accumulator: only a few per cent of the image is written in a given iteration, so a dense per-iteration update would be the dominant cost by far.
-3. **Accumulate colour by orbit age** (`src/nebulabrot/colour.py`). A splat deposits the palette colour of its orbit index, so hue reports how far a point has travelled from its seed. Weights are rounded to multiples of `1/65536`, which keeps every partial sum an exact integer: the accumulation is then genuinely associative, and that is the property `--jobs`-independence rests on.
-
-   A pixel sums whichever ages of light reach it, so a ramp that spans complementary hues averages its own mixtures towards neutral, and the dense core — where most of the light is — ends up grey. The default ramp therefore stays inside one hue family (deep violet through magenta to rose); see [Colour](#colour).
+2. **Iterate and splat** (`src/nebulabrot/kernel.py`). Orbits are advanced a whole chunk at a time; samples whose `|z|` exceeds `Scene.escape_radius_squared` are dropped, which is safe because past `|z| > 2` an orbit diverges monotonically and can never return to the frame. Only orbits that escape are drawn at all: a bounded orbit spends its whole budget piling onto its own attractor, and drawn alongside the escaping ones it floods the interior of the set and buries the nebula. Orbit points that share a pixel are merged before touching the accumulator, because only a few per cent of the image is written in a given iteration.
+3. **Deposit a flux vector** (`src/nebulabrot/colour.py`). Each orbit point deposits three moments into its pixel: the orbit count, and the real and imaginary parts of the unit vector from a pole `--anchor` to the seed that produced it. Two of the three are a *direction*, so the buffer is not a colour and cannot simply be tone mapped. Components are rounded to multiples of `1/8192`, which keeps every partial sum an exact integer: the accumulation is then genuinely associative, and that is the property `--jobs`-independence rests on.
 4. **Smooth** (`nebulabrot.colour.smooth`). Each orbit point is spread over the two pixels around its sub-pixel position, a 2-tap tent per axis. Because accumulation is linear, applying that tent once to the summed buffer equals applying it to every splat, at a fraction of the cost. `--blur-taps 1` is exactly bilinear splatting; more taps give a softer nebula.
-5. **Tone map** (`nebulabrot.colour.to_srgb`). Orbit density is warped by `--density-gamma`, scaled by `--exposure`, rolled off and encoded through the sRGB transfer function. The warp matters more than it looks: orbit density spans about five decades between the faint dust and the core of the nebula, and without it the frame is a bright blob floating in flat black — at `--density-gamma 1` the default scene is 64 % genuinely black and shows nothing between 0 and 200.
+5. **Grade** (`nebulabrot.colour.to_srgb`). The moments become light and colour:
 
-   The roll-off is Reinhard applied to luminance, `1 / (1 + L)` shared by all three channels, rather than per channel. Sharing one scale keeps a pixel's hue as it brightens; per channel, each channel climbs towards 1 at its own rate and highlights desaturate. A saturated core can still outrun its own luminance, so the shared scale is capped at `1 / max channel`, which holds those pixels at 255 with their hue intact instead of clipping them towards white.
+   - **lightness** is the orbit count, dimmed by a shadow of how much of that light kept a common direction, pushed through a logistic on its logarithm -- the characteristic curve of photographic film;
+   - **hue** is the direction the surviving light came from, turned by the palette;
+   - **chroma** is how much of that light kept a common direction, in proportion to how much of it there was.
+
+   Chroma is proportional to lightness, so a shadow keeps the hue of the light reaching it and only fades rather than turning grey. Colours that leave the displayable gamut have their chroma trimmed along the ray from the neutral axis (`nebulabrot.colour.gamut_map`), which keeps hue and lightness where they were; clipping channels instead would draw a hard line across the frame wherever a gradient crossed the gamut boundary.
 
 Each worker owns a full-frame accumulator rather than a strip of one, because an orbit point can land anywhere in the frame: strips would silently drop the contributions of samples owned by other workers, which is exactly what makes the rays reach across the image.
+
+## Colour
+
+Nebulabrot colour is the part of this image that is easiest to get wrong and hardest to notice in a statistic, so the failure modes are worth writing down. Everything below was reached by measuring frames against the Nylander reference and looking at them.
+
+**Why a direction, and not an age.** The obvious colouring -- ramp the orbit index and average what reaches a pixel -- cannot survive the averaging. A pixel sums whichever ages of light reach it, so a ramp that spans a wide hue arc averages its own mixtures towards neutral, and the dense core where most of the light is ends up grey: measured Oklab `C*` 0.023 over the lit part of the frame. Density alone fares no better, being one scalar and therefore one hue at whatever saturation the palette happens to be holding.
+
+Direction does not average away, because it is not a scalar. Light reaching a pixel from the south and light reaching it from the north disagree, and where they agree the mixture stays saturated; the disagreement *is* the picture. So each deposit carries the unit vector from a pole to its seed, and the polarization `|mean vector|` says how much of a pixel's light agrees on where it came from. It doubles as a confidence, which retires the noise gate the first version needed: where the vector sum is unstable, it is small by that same instability, so an unreliable hue never shows up as coloured grain.
+
+**Why the shadow.** Density lights the interior of the set as a glowing blob, because that is where the longest orbits pile up: at the shipped framing the main cardioid covers a third of the frame and holds 2.2x the light of the rest of it, 189 orbit points in a pixel against 87, and reads as a lit blob with no colour, because light arriving from every direction at once has nowhere to be said to come from. Its polarization measures 0.33 against 0.61 outside, so dimming each pixel by its own polarization at `--coherence-shadow 0.85` cuts that 2.2x advantage down to 1.3x and leaves the slope of the tone curve to finish the job. This is the change that made the frame read as a nebula rather than as a heatmap: the set becomes a dark silhouette and the dust lanes come out.
+
+The shadow is deliberately *not* the flux magnitude. The reference colouring lights a pixel with `|sum|` directly, which is the count times the polarization; using it for lightness blurs the density into whatever neighbourhood the direction was measured over, and paints the filaments out. Keeping the count crisp and multiplying by a separately-measured polarization (over `--shadow-neighbourhood`, 16 pixels against the hue's 72) keeps both.
+
+**Why the palette is warped.** Taken as measured, the flux spaces the spectrum evenly, because the direction the light came from sweeps the circle as often as it sweeps anything else. An even rainbow of broad, equally saturated fields is what a colour wheel looks like. `palette_hue` therefore squeezes the hues around blue-violet together, so more of the frame ends up sharing them, and stretches the warm side to pay for it (`--hue-dwell`, `--hue-offset`); the warp is periodic, which is the only way to space a hue circle unevenly without leaving a seam where it wraps.
+
+**The tone curve.** Orbit density spans two and a half decades inside the frame, from 4.6 to 1874 orbit points in a pixel, so it has to be read logarithmically. But a log *window* clipped to `[0, 1]` fails at both ends at once: 30% of an earlier 4K frame pinned onto the same floor value -- a flat black mass where the nebula's falloff should be -- and, from above, reached only `L*` 0.59 at its 99th percentile, so nothing in it could ever burn out to white. A logistic has both ends as asymptotes instead: every decade of density still moves the light, and the brightest cores reach white. The shipped frame's 99th percentile is `L*` 0.88.
+
+The shipped frame measures Oklab `L*` 0.10 / 0.41 / 0.83 at the 5th, 50th and 95th percentiles with 20% of the frame above `L*` 0.7, and chroma-to-lightness 0.22. The reference sits at 0.17 / 0.33 / 0.63 and 0.18: this frame is darker in its shadows, brighter in its cores, and carries about a quarter more colour.
 
 ## Reproducibility
 
 - **Inputs.** `flake.lock` pins nixpkgs to one revision; numpy 2.5.2 and Pillow 12.3.0 come from there.
-- **Arithmetic.** Accumulated values are exact integer sums, so neither chunking nor process count changes a single bit (`tests/test_kernel.py::test_partitioning_samples_does_not_change_the_image`).
+- **Arithmetic.** Accumulated values are exact integer sums, so neither chunking nor process count changes a single bit (`tests/test_kernel.py::test_partitioning_samples_does_not_change_the_buffer`).
 - **Randomness.** Jitter is a hash of the sample index and `--seed`, never a stream position.
+- **Defaults.** The command line builds the shipped scene exactly: angles are read in degrees but defaults pass through untouched, because a default re-encoded on the way through the parser changes the artifact's bytes while changing nothing visible (`tests/test_render.py::test_running_with_no_flags_builds_the_shipped_scene`).
 - **Container.** The PNG carries the scene parameters as a `tEXt` chunk, is written without timestamps, and uses a fixed zlib level, so the file has nothing in it that varies between runs.
-- **Measured.** The shipped frame re-rendered at `--jobs` 8 and 24 gives `sha256:7f98bd29edec917e4d5e7a515e535d74e747e06a610c2c26769bda956ea83229`; earlier revisions reproduced at `--jobs` 2 inside the Nix sandbox as well.
+- **Measured.** The shipped frame, `sha256:122371bde2fd3494bd41ffbc8da21ffa83b792dc3066d9dc2d27d72c573aae50`: rendered locally at `--jobs 16` and at `--jobs 8`, and by `nix build .#image` inside the Nix sandbox at that build's own `NIX_BUILD_CORES`, to the same digest all three times.
 
 To confirm it yourself, render the same scene with different parallelism and compare:
 
@@ -50,21 +69,15 @@ $ nix run .#nebulabrot -- --jobs 8 --output /tmp/b.png
 $ sha256sum /tmp/a.png /tmp/b.png   # identical
 ```
 
-## Colour
-
-Colour is the part of this image that is easiest to get wrong and hardest to notice in a statistic, so it is worth stating what the failure modes are. The frame now measures Oklab `C*` 0.139 averaged over pixels above `L* = 0.15`, and 0.216 in the bright core. Two changes got it there from 0.023 and 0.019:
-
-- **Ramp hue span.** Hue-per-age averages the ramp over the ages that reach a pixel. The previous default ran indigo through orange to teal, and those mixtures pass through neutral: averaged, it is grey. Keeping the ramp inside roughly 100 degrees of hue means an averaged pixel is still coloured, which is worth about 3x on its own (`tests/test_render.py::test_default_palette_cannot_render_grey`).
-- **Where Reinhard is applied.** Per-channel roll-off halved what survived, measured as the brightest decile dropping to `C*` 0.019 against 0.083 for a luminance roll-off on the same light.
-
-The frame is not colour-calibrated: `--palette` chooses a ramp, and the faint dust is the most saturated part of the image, so `--exposure` is really a colour knob as well as a brightness one. At the default exposure 62 % of the frame is below `L* = 0.15`, which is space doing what space does, but a brighter reading is one flag away.
-
 ## Tuning a frame
 
-`--center-real`, `--center-imag` and `--span-real` choose the viewport in the parameter plane; `--iterations` sets how long orbits live and therefore how far the rays reach and how much of the colour ramp is used; `--samples` trades noise for time; `--density-gamma` decides how the decades of density are shared out; `--exposure` sets where the Reinhard knee sits, in units of `COLOUR_LEVELS / exposure` of accumulated light. The defaults in `nebulabrot.scene.DEFAULT_SCENE` are the artifact `nix build .#image` produces. A wide view placed off the real axis avoids a mirror-symmetric composition.
+`--center-real`, `--center-imag` and `--span-real` choose the viewport in the parameter plane and `--anchor-real`, `--anchor-imag` where the hue wheel turns about; putting the anchor on the viewport centre, as the artifact does, turns the palette about the subject. `--iterations` sets how long orbits live and therefore how far the rays reach; `--samples` trades noise for time.
+
+`--tone-mid` puts a given density at half light and `--tone-decades` sets how steeply lightness follows density; the mid belongs to the sampling budget rather than to the geometry, since counts scale with `--samples`, so it has to move with any change to it. `--tone-floor` is the lightness of no light at all. `--coherence-shadow` decides how much a pixel that lost its direction is dimmed, `--shadow-neighbourhood` the scale it is judged on; `--chroma-gain` and `--chroma-gate` set how much colour a pixel spends, and `--chroma-neighbourhood` the scale its direction is judged on. `--hue-offset` rotates the palette, `--hue-dwell` spaces it. The defaults in `nebulabrot.scene.DEFAULT_SCENE` are the artifact `nix build .#image` produces.
 
 ## Residual notes
 
-- The renderer holds one full-frame `float64` accumulator per worker, so peak memory is `jobs × width × height × 3 × 8` bytes; it does not stream or tile.
-- Hue encodes orbit age, so it is a per-splat property, not a measurement of the rendered image: the colour of a pixel is a density-weighted average of the ages that reached it.
+- The renderer holds one full-frame accumulator per worker, so peak memory is `jobs × width × height × 3 × 8` bytes; it does not stream or tile.
+- Polarization is a measurement of the rendered image rather than a per-splat property: the colour of a pixel is what the light reaching it adds up to, which is why it survives being averaged and an age ramp does not. It follows that the colour of a pixel changes with `--samples`, in the way a photograph's grain does.
+- The framing is symmetric about the real axis, as is the set, so the artifact is mirror-symmetric top to bottom. Earlier drafts avoided this by placing the viewport off the axis; the whole-set view is worth the symmetry.
 - Orbits are computed in `float64`, which is stable for the iteration counts used here but is not a proof that a plotted point is on the true orbit of its seed: chaotic orbits diverge from the exact trajectory long before the iteration budget ends. Nebulabrot renders a density field, so that difference is not visible, but the image is best described as a picture of this computation.
