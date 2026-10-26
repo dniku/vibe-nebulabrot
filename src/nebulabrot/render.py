@@ -4,6 +4,10 @@ Every worker owns a full-size accumulation buffer rather than a strip of one:
 an orbit point can land anywhere in the viewport, so a strip would silently lose
 the contributions of samples owned by other workers, which is exactly what makes
 the long rays of a Nebulabrot reach across the frame.
+
+Accumulation is the part that parallelizes; grading the buffer into colour is a
+single pass over 25 MB and stays in the parent, where it can be retuned without
+rendering again.
 """
 
 from __future__ import annotations
@@ -45,8 +49,7 @@ def default_jobs(scene: Scene) -> int:
 
 
 def _render_samples(scene: Scene, first_sample: int, last_sample: int) -> npt.NDArray[np.float64]:
-    ring = scene.ring_width
-    buffer = np.zeros((scene.height + 2 * ring, scene.width + 2 * ring, 3), dtype=np.float64)
+    buffer = colour.blank_buffer(scene)
     kernel.accumulate(scene, first_sample, last_sample, buffer)
     return buffer
 
@@ -58,14 +61,15 @@ def _sample_bounds(scene: Scene, jobs: int) -> list[tuple[int, int]]:
 
 
 def accumulate(scene: Scene, jobs: int) -> npt.NDArray[np.float64]:
-    """Accumulate every sample of ``scene`` in linear light, ring already cropped.
+    """Accumulate every sample of ``scene``, ring already cropped.
 
-    The result still has to be tone mapped, which is a separate decision from
-    how much light is there: ``--exposure`` can be retuned without re-rendering.
+    The result is three moments per pixel, not a colour: grading it is a separate
+    decision from how much light is there, so ``--tone-mid`` and ``--chroma-gain``
+    can be retuned without rendering again.
     """
     started = time.monotonic()
     ring = scene.ring_width
-    accumulated = np.zeros((scene.height + 2 * ring, scene.width + 2 * ring, 3), dtype=np.float64)
+    accumulated = colour.blank_buffer(scene)
     bounds = _sample_bounds(scene, jobs)
     if jobs == 1:
         for first, last in bounds:
@@ -97,7 +101,7 @@ def accumulate(scene: Scene, jobs: int) -> npt.NDArray[np.float64]:
 
 def render(scene: Scene, jobs: int) -> npt.NDArray[np.uint8]:
     """Render ``scene`` to 8-bit sRGB."""
-    return colour.to_srgb(accumulate(scene, jobs), scene.exposure, scene.density_gamma)
+    return colour.to_srgb(accumulate(scene, jobs), scene)
 
 
 def write_png(image: npt.NDArray[np.uint8], scene: Scene, path: pathlib.Path) -> None:

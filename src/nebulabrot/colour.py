@@ -1,47 +1,76 @@
-"""Colour ramp, smoothing and tone mapping.
+"""Accumulation layout, smoothing, and turning moments into colour.
 
-Orbit points are accumulated in linear light.  The per-iteration colour is
-quantised to an exact integer multiple of ``1 / COLOUR_LEVELS`` so that every
-partial sum the renderer performs is an exact integer: the accumulated buffer
-is therefore independent of the order samples are processed in, which is what
-lets a render be reproduced with any number of worker processes (see
-:mod:`nebulabrot.kernel`).
+An accumulation buffer holds three moments per pixel: the orbit count, and the
+real and imaginary parts of the accumulated flux vector described by
+:class:`nebulabrot.scene.Scene`.  Two of the three are a *direction*, so the
+buffer is not a colour and cannot simply be tone mapped: it has to be split into
+the parts that make a picture.
+
+    lightness  = characteristic curve of the orbit count, dimmed by a shadow of
+                 how much of that light kept a common direction
+    hue        = direction the light reaching the pixel came from, turned by the
+                 palette
+    chroma     = how much of that light kept a common direction
+
+Both colour quantities are ratios, so they survive being compared over a
+neighbourhood rather than per pixel: :func:`neighbourhood_average` blurs the
+moments first, which is what makes the hue field vary smoothly across the frame
+instead of pixel by pixel.  That separation -- crisp structure in lightness,
+smooth structure in hue -- is the thing a single per-pixel density cannot do, and
+the reason a Nebulabrot rendered as one channel and ramped through a palette
+always comes out as one colour that only varies in brightness.
+
+Lightness is driven by the orbit count and *not* by the flux magnitude, as the
+reference colouring has it: the magnitude is the count times the polarization, so
+using it for lightness blurs the density into the hue's neighbourhood and paints
+the filaments out.  The polarization enters as a shadow instead -- a multiplication
+in density, which is an addition in log density -- so the crisp structure the
+count carries stays crisp while the interior of the set, where light arrives from
+every direction at once, drops out as a silhouette.
+
+Chroma is proportional to lightness, so a shadow keeps the hue of the light that
+reaches it and only fades, rather than going grey.
+
+Each channel of the buffer is an integer sum, which is what makes the render
+bit-reproducible whatever ``--jobs`` does.  float64 represents integers below
+2**53 exactly; :data:`nebulabrot.scene.FLUX_QUANTUM` bounds the worst case --
+every orbit point of a 4K render landing in one pixel -- at 1.1e15.
 """
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import numpy.typing as npt
 
-from nebulabrot.scene import Palette
-
-#: Colour levels of the quantised weights.  Accumulation stays exact because
-#: every weight is an integer and float64 represents integers below 2**53
-#: exactly.  The worst case is every orbit point of a render landing on one
-#: pixel: the default 4K scene has 3840 * 2160 * 16 * 500 = 6.6e10 orbit points,
-#: and 6.6e10 * 2**16 = 4.3e15 < 9.0e15, so even that keeps every sum exact.
-COLOUR_LEVELS = 1 << 16
+from nebulabrot.scene import FLUX_QUANTUM, MOMENTS, Scene
 
 #: Linear-light crossover of the sRGB transfer function (IEC 61966-2-1).
 _SRGB_THRESHOLD = 0.0031308
 
-#: Rec. 709 luminance weights, used to roll off highlights without rotating hue.
-LUMINANCE_COEFFICIENTS = np.array([0.2126, 0.7152, 0.0722])
+# Oklab as published (https://bottosson.github.io/posts/oklab/), with the inverse
+# matrices derived from these two rather than transcribed a second time.
+_LINEAR_SRGB_TO_LMS = np.array(
+    [
+        [0.4122214708, 0.5363325363, 0.0514459929],
+        [0.2119034982, 0.6806995451, 0.1073969566],
+        [0.0883024619, 0.2817188376, 0.6299787005],
+    ]
+)
+_LMS_TO_OKLAB = np.array(
+    [
+        [0.2104542553, 0.7936177850, -0.0040792477],
+        [1.9779984951, -2.4285922050, 0.4505937099],
+        [0.0259040371, 0.7827717662, -0.8086757660],
+    ]
+)
+_OKLAB_TO_LMS_ROOT = np.linalg.inv(_LMS_TO_OKLAB)
+_LMS_TO_LINEAR_SRGB = np.linalg.inv(_LINEAR_SRGB_TO_LMS)
 
-
-def iteration_weights(scene_palette: Palette, iterations: int) -> npt.NDArray[np.float64]:
-    """Quantised colour of orbit point ``i``, shape ``(iterations, 3)``.
-
-    Orbit age is normalised over ``[0, 1]``, so the ramp is a property of the
-    palette rather than of the iteration budget.  Rounding to multiples of
-    ``1 / COLOUR_LEVELS`` is what makes every partial sum exact.
-    """
-    age = np.linspace(0.0, 1.0, iterations, dtype=np.float64)
-    control_points = np.array(scene_palette.value, dtype=np.float64)
-    ramp = np.stack(
-        [np.interp(age, control_points[:, 0], column) for column in control_points[:, 1:].T]
-    ).T
-    return np.rint(ramp * COLOUR_LEVELS)
+#: Rows of the image graded at a time.  The gamut search below needs a handful of
+#: full-size temporaries per band; at 4K this keeps the peak to a few hundred MB.
+_BAND_ROWS = 256
 
 
 def smooth(accumulated: npt.NDArray[np.float64], taps: int, ring: int) -> npt.NDArray[np.float64]:
@@ -52,8 +81,8 @@ def smooth(accumulated: npt.NDArray[np.float64], taps: int, ring: int) -> npt.ND
     the summed buffer is equivalent to applying it to every splat, at a small
     fraction of the cost.  ``taps == 1`` is exactly bilinear splatting.
 
-    ``ring`` must be at least ``taps``: ``Scene.ring_width`` guarantees it, and
-    each tap consumes one ring column that would otherwise have received light.
+    Every moment is blurred with the same kernel, which is what keeps the flux
+    comparable with the count it is divided by.
     """
     blurred = accumulated
     for _ in range(taps):
@@ -65,40 +94,215 @@ def smooth(accumulated: npt.NDArray[np.float64], taps: int, ring: int) -> npt.ND
     return blurred[ring:-ring, ring:-ring, :]
 
 
-def to_srgb(
-    accumulated: npt.NDArray[np.float64], exposure: float, density_gamma: float
-) -> npt.NDArray[np.uint8]:
-    """Tone-map accumulated linear light to 8-bit sRGB.
+def _moving_average(
+    field: npt.NDArray[np.float64], radius: int, axis: int
+) -> npt.NDArray[np.float64]:
+    """Mean over a ``2 * radius + 1`` window, edge-replicated, in O(n)."""
+    window = 2 * radius + 1
+    border = [(0, 0)] * axis + [(radius, radius)] + [(0, 0)] * (field.ndim - axis - 1)
+    padded = np.moveaxis(np.pad(field, border, mode="edge"), axis, 0)
+    prefix = np.concatenate([np.zeros_like(padded[:1]), padded.cumsum(axis=0, dtype=np.float64)])
+    summed = prefix[window : window + field.shape[axis]] - prefix[: field.shape[axis]]
+    return np.moveaxis(summed, 0, axis) / window
 
-    ``density_gamma`` warps the density first, which is the part that makes a
-    Nebulabrot viewable: orbit density spans five decades between the faint dust
-    and the core, and a default frame has nothing in between.  Warping by
-    ``x ** density_gamma`` spends the 8-bit range on the decades rather than on
-    the core, at the cost of flattening contrast within any one of them.
 
-    Reinhard is applied to luminance and then shared by all three channels, so a
-    pixel keeps its hue as it brightens.  Applying it per channel instead drives
-    each channel towards 1 independently, which measures as half the colour: on
-    the default frame the brightest decile drops from C* 0.083 to 0.019.  The
-    scale factor is ``1 / (1 + L)``, because ``L / (1 + L) / L`` collapses; at
-    ``L == 0`` it is 1 and the channels are already zero.
+def neighbourhood_average(
+    field: npt.NDArray[np.float64], radius: int, passes: int = 3
+) -> npt.NDArray[np.float64]:
+    """Average each channel over a wide neighbourhood, three box passes.
 
-    A saturated core can still outrun its own luminance, in which case both
-    channels are scaled down together rather than clipped: 2.5% of the default
-    frame is held at 255 that way, where clipping it would have desaturated those
-    pixels towards white as well.
+    Three passes so the kernel is close enough to a Gaussian to leave no boxy
+    ringing.  Edge replication keeps the frame border from being pulled towards
+    zero, which a zero-padded filter would do as a dark or desaturated edge.
     """
-    linear = np.power(accumulated * (exposure / COLOUR_LEVELS), density_gamma)
-    roll_off = 1.0 / (1.0 + linear @ LUMINANCE_COEFFICIENTS)
-    # A saturated highlight can outrun its own luminance.  Capping the shared
-    # scale at ``1 / max channel`` brings it back into range proportionally, so
-    # the pixel lands on 255 with its hue intact instead of clipping towards
-    # white; the cap is inert below 1, where Reinhard is already in range.
-    guard = 1.0 / np.maximum(linear.max(axis=-1), 1.0)
-    linear *= np.expand_dims(np.minimum(roll_off, guard), axis=-1)
+    averaged = field
+    for _ in range(passes):
+        averaged = _moving_average(_moving_average(averaged, radius, 0), radius, 1)
+    return averaged
+
+
+def tone(
+    signal: npt.NDArray[np.float64], *, mid: float, decades: float, floor: float
+) -> npt.NDArray[np.float64]:
+    """Map ``mid`` orbit points to half light, ``floor`` to no light and 1.0 to any light.
+
+    A logistic on the logarithm of the signal -- the characteristic curve of
+    photographic film.  Density has to be read logarithmically, since it spans
+    orders of magnitude inside one frame and a linear ramp spends all of its
+    steps on the brightest few pixels; but a log window that is then clipped to
+    ``[0, 1]`` leaves two artefacts the eye reads at once.  Everything below the
+    window clips to the same black, which turns the nebula's falloff into a flat
+    mass -- 30% of the first 4K frame -- and everything above it has no way to
+    reach white, which caps the same frame at two thirds light and gives it no
+    hot cores at all.  The logistic has both ends as asymptotes instead: a
+    density gradient stays a gradient however faint it gets, and
+    ``decades``/``floor`` set its slope and its black without either clip.
+    """
+    windowed = np.log10(np.maximum(signal, 1e-12) / mid) / (2.0 * decades)
+    return floor + (1.0 - floor) / (1.0 + 10.0 ** (-math.pi * windowed))
+
+
+def _averaged(
+    moments: npt.NDArray[np.float64], neighbourhood: int
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Count and flux vector of the light reaching each pixel's neighbourhood.
+
+    The moments are averaged before any ratio is taken, so a pixel is measured
+    against the light reaching its neighbourhood.  Division is the only way to
+    get a scale-free measure out of a sum, and comparing a blurred numerator
+    against an unblurred denominator would just move the noise somewhere else.
+    ``neighbourhood == 0`` compares a pixel against nothing at all.
+    """
+    if not neighbourhood:
+        return moments[..., 0], moments[..., 1:]
+    return (
+        neighbourhood_average(moments[..., 0], neighbourhood),
+        neighbourhood_average(moments[..., 1:], neighbourhood),
+    )
+
+
+def _polarization(
+    counts: npt.NDArray[np.float64], vectors: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
+    """Length of the mean flux vector: 1 for one direction, 0 for every direction.
+
+    Back off the quantization first: the buffer holds whole numbers so that its
+    sums are exact, and this is where they become vectors of length at most 1
+    again.
+    """
+    magnitude = np.hypot(vectors[..., 0], vectors[..., 1]) * FLUX_QUANTUM
+    return np.divide(magnitude, counts, out=np.zeros_like(magnitude), where=counts > 0.0)
+
+
+def flux(
+    moments: npt.NDArray[np.float64], *, neighbourhood: int
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Direction and polarization of the accumulated flux, per pixel.
+
+    Polarization is also a confidence, which is why no separate noise gate is
+    needed: where the vector sum is unstable because the contributions cancel, it
+    is small by that same cancellation, so an unreliable hue never shows up as
+    coloured grain.
+    """
+    counts, vectors = _averaged(moments, neighbourhood)
+    return np.arctan2(vectors[..., 1], vectors[..., 0]), _polarization(counts, vectors)
+
+
+def coherence(moments: npt.NDArray[np.float64], *, neighbourhood: int) -> npt.NDArray[np.float64]:
+    """Polarization of the light reaching each pixel, on its own without the hue.
+
+    The shadow that dims a pixel and the hue it is painted with ask the same
+    question at two different scales, so they get their own measurement; see
+    :attr:`nebulabrot.scene.Scene.shadow_neighbourhood`.
+    """
+    counts, vectors = _averaged(moments, neighbourhood)
+    return _polarization(counts, vectors)
+
+
+#: Oklab hue, in radians, that the palette lingers on: blue-violet, the hue the
+#: eye is least able to place on the sphere and so the one a wide palette can
+#: afford to spend its room on.  See :func:`palette_hue`.
+DWELL_PHASE = math.radians(265.0)
+
+
+def palette_hue(
+    hue: npt.NDArray[np.float64], *, offset: float, dwell: float
+) -> npt.NDArray[np.float64]:
+    """Turn a measured flux direction into the hue the picture is painted with.
+
+    The direction the light came from is a fair measurement and a poor palette:
+    taken as a hue it spaces the spectrum evenly, and an even rainbow of broad,
+    equally saturated fields is what makes a Nebulabrot look like a colour wheel
+    rather than a nebula.
+
+    ``offset`` rotates the palette as a whole.  ``dwell`` makes it non-uniform on
+    the circle, spending more of the frame near :data:`DWELL_PHASE` and hurrying
+    through the opposite, warm side; it must stay within ``[-1, 1]`` for the map
+    to remain monotone.  The warp is periodic, which is the only way to space a
+    hue circle unevenly without leaving a seam where it wraps -- scaling it would
+    cut the frame in two along the anti-meridian.
+    """
+    turned = hue + offset
+    return turned - dwell * np.sin(turned - DWELL_PHASE)
+
+
+def oklab_to_linear_srgb(lab: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Oklab to linear sRGB, deliberately left unclipped.
+
+    The gamut search below reads the negative excursions to tell how far outside
+    the display cube a colour sits; clipping here would hide what it looks for.
+    """
+    lms_root = lab @ _OKLAB_TO_LMS_ROOT.T
+    lms = np.sign(lms_root) * np.abs(lms_root) ** 3
+    return lms @ _LMS_TO_LINEAR_SRGB.T
+
+
+def _to_lch(
+    lightness: npt.NDArray[np.float64],
+    hue: npt.NDArray[np.float64],
+    chroma: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    return np.stack([lightness, chroma * np.cos(hue), chroma * np.sin(hue)], axis=-1)
+
+
+def gamut_map(
+    lightness: npt.NDArray[np.float64],
+    hue: npt.NDArray[np.float64],
+    chroma: npt.NDArray[np.float64],
+    iterations: int = 11,
+) -> npt.NDArray[np.float64]:
+    """Shrink chroma until the colour is displayable, holding hue and lightness.
+
+    A binary search along the ray from the neutral axis, where leaving the display
+    cube is monotone in chroma.  Clipping the channels instead would paint a hard
+    edge wherever a gradient crossed the boundary of the gamut: a line across the
+    middle of a nebula, in whatever hue happened to be outside.
+    """
+    low = np.zeros(lightness.shape, dtype=np.float64)
+    high = np.ones(lightness.shape, dtype=np.float64)
+    for _ in range(iterations):
+        scale = (low + high) * 0.5
+        rgb = oklab_to_linear_srgb(_to_lch(lightness, hue, chroma * scale))
+        in_gamut = ((rgb >= 0.0) & (rgb <= 1.0)).all(axis=-1)
+        low = np.where(in_gamut, scale, low)
+        high = np.where(in_gamut, high, scale)
+    return np.clip(oklab_to_linear_srgb(_to_lch(lightness, hue, chroma * low)), 0.0, 1.0)
+
+
+def encode_srgb(linear: npt.NDArray[np.float64]) -> npt.NDArray[np.uint8]:
+    """Apply the sRGB transfer function and quantize to 8 bits."""
     encoded = np.where(
         linear <= _SRGB_THRESHOLD,
         linear * 12.92,
-        1.055 * np.power(linear, 1.0 / 2.4) - 0.055,
+        1.055 * np.power(np.clip(linear, 0.0, None), 1.0 / 2.4) - 0.055,
     )
     return np.rint(np.clip(encoded, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+
+def to_srgb(moments: npt.NDArray[np.float64], scene: Scene) -> npt.NDArray[np.uint8]:
+    """Tone map an accumulation buffer, ring already cropped, into 8-bit sRGB."""
+    hue, polarization = flux(moments, neighbourhood=scene.chroma_neighbourhood)
+    shadow = coherence(moments, neighbourhood=scene.shadow_neighbourhood)
+    lightness = tone(
+        moments[..., 0] * shadow**scene.coherence_shadow,
+        mid=scene.tone_mid,
+        decades=scene.tone_decades,
+        floor=scene.tone_floor,
+    )
+    chroma = scene.chroma_gain * lightness * polarization**scene.chroma_gate
+    hue = palette_hue(hue, offset=scene.hue_offset, dwell=scene.hue_dwell)
+    encoded = np.empty((*lightness.shape, 3), dtype=np.uint8)
+    for start in range(0, lightness.shape[0], _BAND_ROWS):
+        stop = min(start + _BAND_ROWS, lightness.shape[0])
+        encoded[start:stop] = encode_srgb(
+            gamut_map(lightness[start:stop], hue[start:stop], chroma[start:stop])
+        )
+    return encoded
+
+
+def blank_buffer(scene: Scene) -> npt.NDArray[np.float64]:
+    """One accumulation buffer: three moments over the image plus its discard ring."""
+    return np.zeros(
+        (scene.height + 2 * scene.ring_width, scene.width + 2 * scene.ring_width, MOMENTS),
+        dtype=np.float64,
+    )
