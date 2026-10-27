@@ -132,8 +132,8 @@ Everything above is drawn by `docs/figures.py`, which is why the two retired cur
 - **Randomness.** Jitter is a hash of the sample index and `--seed`, never a stream position.
 - **Defaults.** The command line builds the shipped scene exactly: angles are read in degrees but defaults pass through untouched, because a default re-encoded on the way through the parser changes the artifact's bytes while changing nothing visible (`tests/test_render.py::test_running_with_no_flags_builds_the_shipped_scene`).
 - **Container.** The PNG carries the scene parameters as a `tEXt` chunk, is written without timestamps, and uses a fixed zlib level, so the file has nothing in it that varies between runs.
-- **Recorded.** [`ARTIFACT.sha256`](ARTIFACT.sha256) holds the digest of the shipped frame, and CI fails if `nix build .#image` stops producing it. That file, not this paragraph, is the thing to update if the look is ever deliberately changed.
-- **Measured.** The shipped frame, `sha256:122371bde2fd3494bd41ffbc8da21ffa83b792dc3066d9dc2d27d72c573aae50`: rendered locally at `--jobs 16` and at `--jobs 8`, and by `nix build .#image` inside the Nix sandbox at that build's own `NIX_BUILD_CORES`, to the same digest all three times.
+- **Recorded.** [`ARTIFACT.sha256`](ARTIFACT.sha256) holds the digest of the shipped frame, and CI fails if `nix build .#image` stops producing it. CI also renders a smaller frame twice over, at `--jobs 1` and at `--jobs 5`, and compares the two, so the digest is known not to depend on the worker count. About seven minutes of a GitHub runner, most of it the 4K render. That file, not this paragraph, is the thing to update if the look is ever deliberately changed.
+- **Measured.** The shipped frame, `sha256:122371bde2fd3494bd41ffbc8da21ffa83b792dc3066d9dc2d27d72c573aae50`: rendered locally at `--jobs 16` and at `--jobs 8`, by `nix build .#image` inside the Nix sandbox at that build's own `NIX_BUILD_CORES`, and on a GitHub-hosted `ubuntu-24.04` runner, which reaches it from its own core count and memory budget. Four renders, one digest.
 
 To confirm it yourself, render the same scene with different parallelism and compare:
 
