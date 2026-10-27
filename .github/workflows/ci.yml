@@ -48,8 +48,17 @@ jobs:
 
       - name: Compare against the documented digest
         run: |
-          digest=$(cut --fields=1 ARTIFACT.sha256)
-          printf '%s  %s\n' "$digest" "$(cat nix-out.txt)" | sha256sum --check --status
+          # ARTIFACT.sha256 is a sha256sum line: digest, two spaces, filename. Split it on
+          # spaces, not tabs -- cut defaults to tabs and hands back the whole line, which
+          # sha256sum --check then reads as one long filename. Pair the digest with the
+          # store path this render landed at, since that path is not the recorded name.
+          digest=$(cut --delimiter=' ' --fields=1 ARTIFACT.sha256)
+          rendered=$(cat nix-out.txt)
+          if ! printf '%s  %s\n' "$digest" "$rendered" | sha256sum --check --status; then
+            echo "expected $digest"
+            echo "actual   $(sha256sum "$rendered")"
+            exit 1
+          fi
           echo "Artifact reproduced: $digest"
 
       - name: Same bytes whatever the worker count
